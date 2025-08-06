@@ -1,0 +1,6 @@
+{
+  "persist_directory": "/app/db/lance/pdf_word",
+  "table_name": "pdf_word",
+  "embedding_model": "/mydata/llm/vector/models/legal-bge-m3",
+  "normalize_embeddings": true
+}

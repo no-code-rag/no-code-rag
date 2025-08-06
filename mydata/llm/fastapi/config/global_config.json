@@ -1,0 +1,7 @@
+{
+  "model": "/models/gemma-2-2b-jpn-it-Q5/gemma-2-2b-jpn-it-Q5_K_L.gguf",
+  "speaker_uuid": "1f18ffc3-47ea-4ce0-9829-0576d03a7ec8",
+  "style_id": 62,
+  "prompt_id": "ruizu",
+  "rag_mode": "refer"
+}

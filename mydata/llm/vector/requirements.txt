@@ -1,0 +1,58 @@
+# === 🚀 FastAPI サーバ & API基盤 ===
+fastapi
+uvicorn
+pydantic
+requests
+httpx
+
+# === 📄 OCR・PDF・画像処理関連 ===
+pytesseract
+pdf2image
+pdfminer.six
+PyMuPDF
+PyPDF2
+piexif
+ocrmypdf
+
+# === 📊 Office系ファイル処理 ===
+pandas
+python-docx
+openpyxl
+xlrd
+natsort
+
+# === ✂️ チャンク処理・ベクトル化関連 ===
+tqdm
+numpy
+scikit-learn
+sentence-transformers
+transformers
+huggingface-hub
+sentencepiece
+orjson
+
+# === 🧠 ベクトルDB / FAISS専用 ===
+faiss-cpu
+
+# === 📅 カレンダーAPI関連 ===
+google-api-python-client
+google-auth
+google-auth-oauthlib
+icalendar
+icalevents
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
