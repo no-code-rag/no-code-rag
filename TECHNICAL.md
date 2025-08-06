@@ -114,6 +114,11 @@ graph TD
   FastAPI -->|応答+音声を返す| UI
 ```
 
+### 🔍 RAGログの例（Portainer）
+
+![ログ画面](docs/demo_logs.png)
+
+
 > ※ `Jupyter` は本流には接続せず、開発検証用として `vector/`, `db/`, `log/` 等を読み取り・操作可能なスタンドアロン構成となっています。
 
 ### 🧠 使用している埋め込みモデル
