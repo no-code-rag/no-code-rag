@@ -51,7 +51,7 @@ no-code-rag/
 
 ## ディレクトリ構成
 
-以下は `/mydata/llm/` 以下の構成図です。
+以下は `/mydata/llm/` 以下の大体の構成図です。
 
 ### テキスト形式
 /mydata/llm/
@@ -93,10 +93,7 @@ no-code-rag/
 │   └── script/
 ├── voicevox/
 ├── log/
-├── nas/
-├── opt/
-├── proc/
-└── root/
+└── nas/
 
 
 💡 開発背景
