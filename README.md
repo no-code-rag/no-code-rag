@@ -53,45 +53,44 @@ no-code-rag/
 
 以下は `/mydata/llm/` 以下の大体の構成図です。
 
-### テキスト形式
-/mydata/llm/
-├── fastapi/
-│   ├── chat_logs/
+/mydata/
+├── llm/
+│   ├── fastapi/
+│   │   ├── chat_logs/
+│   │   │   ├── config/
+│   │   │   ├── prompts/
+│   │   │   └── rag_prompt/
 │   │   ├── config/
-│   │   ├── prompts/
-│   │   └── rag_prompt/
-│   ├── config/
-│   ├── routers/
-│   ├── static/
-│   ├── entrypoint.sh
-│   ├── requirements.txt
-│   ├── docker-compose.yml
-│   ├── Dockerfile
-│   ├── main.py
-│   ├── cert.pem
-│   └── key.pem
-├── jupyter/
-├── llama/
-│   └── models/
-│       ├── gemma-2-2b-jpn-it-Q5
-│       ├── gemma-3-4b-it-qat-q4_0
-│       ├── shisa-v2-llama3.1-8b
-│       └── shisa-v2-unphi4-14b-qat_k_m
-├── vector/
-│   ├── db/
-│   │   ├── chunk/
-│   │   │   └── calendar/
-│   │   ├── faiss/
-│   │   │   ├── excel_calendar/
-│   │   │   └── pdf_word/
-│   │   ├── log/
-│   │   └── text/
-│   │       └── calendar/
-│   ├── models/
-│   │   ├── legal-bge-m3
-│   │   └── ruri-310m
-│   └── script/
-├── voicevox/
+│   │   ├── routers/
+│   │   ├── static/
+│   │   ├── entrypoint.sh
+│   │   ├── requirements.txt
+│   │   ├── docker-compose.yml
+│   │   ├── Dockerfile
+│   │   ├── main.py
+│   │   ├── cert.pem
+│   │   └── key.pem
+│   ├── jupyter/
+│   ├── llama/
+│   │   └── models/
+│   │       ├── gemma-2-2b-jpn-it-Q5
+│   │       ├── gemma-3-4b-it-qat-q4_0
+│   │       ├── shisa-v2-llama3.1-8b
+│   │       └── shisa-v2-unphi4-14b-qat_k_m
+│   └── vector/
+│       ├── db/
+│       │   ├── chunk/
+│       │   │   └── calendar/
+│       │   ├── faiss/
+│       │   │   ├── excel_calendar/
+│       │   │   └── pdf_word/
+│       │   ├── log/
+│       │   └── text/
+│       │       └── calendar/
+│       ├── models/
+│       │   ├── legal-bge-m3
+│       │   └── ruri-310m
+│       └── script/
 ├── log/
 └── nas/
 
