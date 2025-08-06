@@ -22,30 +22,58 @@ no-code-rag/
 
 ---
 
-## 第３章　コンテナ別 技術構成
+## 第3章 コンテナ別 技術構成
 
 ### 🔹 fastapi（firstAPI）
 
-- Pythonベース、FastAPIによる中枢統括
-- 音声出力、プロンプト切替、モデル制御を集約
-- 使用ライブラリ：fastapi, uvicorn, httpx, pydantic, python-dotenv, tiktoken, faster-whisper, webrtcvad, sounddevice, pydub, pyaudio
-- Whisperベース音声入力とVOICEVOX出力を両対応
-- UIとの統合は `/static/` 以下のJS・CSSで実現
+Pythonベース、FastAPIによる中枢統括。  
+音声出力、プロンプト切替、モデル制御を集約。
+
+- **使用ライブラリ**：  
+  `fastapi`, `uvicorn`, `httpx`, `pydantic`, `python-dotenv`, `tiktoken`  
+  `faster-whisper`, `webrtcvad`, `sounddevice`, `pydub`, `pyaudio`
+
+- **主な仕様**：  
+  Whisperベース音声入力と VOICEVOX 出力に両対応  
+  UIとは `/static/` 以下の JavaScript・CSS で統合
+
+---
 
 ### 🔹 vector（ベクトル処理）
 
-- OCR処理：pytesseract / ocrmypdf / pdf2image
-- Office処理：python-docx / openpyxl / xlrd / pandas / natsort
-- ベクトル化：sentence-transformers / faiss-cpu
-- カレンダー連携：google-api-python-client / icalendar / icalevents
-- UID/チャンク/削除ログの自動管理に対応
+- **主な処理内容**：
+  - OCR・Officeファイルからのテキスト抽出
+  - チャンク化・ベクトル化・SQLite＋FAISSへの登録
+  - ファイルの変更・削除に対応した再構成・復元処理
+
+- **使用ライブラリ**：
+  - OCR処理：`pytesseract`, `ocrmypdf`, `pdf2image`  
+  - Office処理：`python-docx`, `openpyxl`, `xlrd`, `pandas`, `natsort`  
+  - ベクトル化：`sentence-transformers`, `faiss-cpu`  
+  - カレンダー連携：`google-api-python-client`, `icalendar`, `icalevents`
+
+- **システム仕様**：
+  - UID単位のチャンク管理
+  - 削除ログとの突き合わせ処理
+  - 元ファイル変更・削除時に SQLite / FAISS から再構築
+  - ベクトルは SQLite に保持された数値を使って高速復元可能
+
+---
 
 ### 🔹 llama（推論）
 
-- llama-cpp-python による gguf モデル推論
-- transformers / sentencepiece によるトークナイズサポート
-- CPU環境でも高速推論可能
-- ポート8001で FastAPI 経由で呼び出し
+- **主な処理内容**：
+  - FastAPI 経由で `llama-cpp-python` による GGUF モデル推論
+  - モデル・プロンプト・RAG引用の動的切り替えに対応
+
+- **使用ライブラリ**：
+  `llama-cpp-python`, `transformers`, `sentencepiece`
+
+- **システム仕様**：
+  - GGUF モデル対応（量子化モデルでも可）
+  - CPU環境でも実用速度で推論可能
+  - FastAPI エンドポイント：`http://localhost:8001/chat/completions`
+  - システムプロンプト、モデル、RAG引用方法は UI から変更可能
 
 ### 🤖 使用している LLM モデル（推論用）
 
