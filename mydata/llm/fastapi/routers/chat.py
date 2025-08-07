@@ -144,10 +144,13 @@ async def completions(req: CompletionRequest):
     rag_prompt = f"【下位ルール】\n{rag_filled.strip()}"
 
     user_prompt = (
-        "以下のルールに従って回答せよ。上位ルールに反しない限り、下位ルールを厳守すること。\n\n"
-        f"{character_prompt}\n\n"
-        f"{question_prompt}\n\n"
-        f"{rag_prompt}"
+        "以下のルールに従って回答せよ。\n"
+        "最重要なのは【キャラクター設定】であり、回答全体を通じて人格・口調・語彙・価値観を一貫させること。\n"
+        "ただし【補足情報（RAG）】の指示は**絶対に厳守**せよ。内容を無視・軽視・改変することは許されない。\n\n"
+        f"【キャラクター設定】\n{character_raw}\n\n"
+        f"【ユーザーからの質問】\n{user_message.strip()}\n\n"
+        f"【補足情報（RAG）】\n{rag_filled.strip()}\n\n"
+        "※RAG情報に基づく引用や根拠の明示が求められる場合、それを適切に盛り込みつつ、キャラクターとして自然な形で語れ。"
     )
 
     logging.info(f"[PROMPT文字数]: {len(user_prompt)}")
