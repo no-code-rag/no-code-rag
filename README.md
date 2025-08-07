@@ -20,7 +20,7 @@ LLMに質問すると該当ファイルを検索して根拠を示した回答�
 
 実際に動作しているチャットUIの画面例です：
 
-![UI デモ](docs/demo_chat_ui.png)
+![UI デモ](docs/demo_chat_ui2.png)
 
 
 ## 📦 利用方法（3ステップ）
