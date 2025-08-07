@@ -111,3 +111,6 @@ no-code-rag/
 📄 ライセンス
 非商用・自己責任の範囲で使用可能です。
 詳細は LICENSE をご確認ください。
+
+Qiitaで紹介中！
+https://qiita.com/Sectoid/items/e1544ff351883a0e442e
