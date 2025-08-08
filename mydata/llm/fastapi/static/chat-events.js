@@ -1,6 +1,6 @@
 import { getCurrentRoomId } from "./room-api.js";
 import { getGlobalConfig } from "./config.js";
-import { synthesizeMultiSpeech } from "./voice-api.js";
+import { enqueueTtsSentence } from "./voice-api.js";
 
 function extractModelName(modelId) {
   if (!modelId) return "";
@@ -140,6 +140,10 @@ async function sendChatMessage(text, model, speaker_uuid, style_id, roomId) {
   let assistantText = "";
   let buffer = "";
 
+  // ▼ TTS用の未確定バッファ
+  let ttsBuf = "";
+  const re = /(.+?[。！？\n])/;
+
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -156,8 +160,21 @@ async function sendChatMessage(text, model, speaker_uuid, style_id, roomId) {
       try {
         const parsed = JSON.parse(chunk);
         const delta = parsed.choices?.[0]?.delta?.content || "";
+        if (!delta) continue;
+
+        // 表示
         assistantText += delta;
         updateAssistantText(assistantText, messageId);
+
+        // ▼ 文確定 → 順序キューへ投入（非並列）
+        ttsBuf += delta;
+        let m;
+        while ((m = re.exec(ttsBuf))) {
+          const sentence = m[1];
+          ttsBuf = ttsBuf.slice(m.index + sentence.length);
+          enqueueTtsSentence(sentence, speaker_uuid, style_id);
+        }
+
         await new Promise(requestAnimationFrame);
       } catch (e) {
         console.warn("ストリーム解析失敗:", e);
@@ -165,14 +182,10 @@ async function sendChatMessage(text, model, speaker_uuid, style_id, roomId) {
     }
   }
 
-  const audioUrls = await synthesizeMultiSpeech(assistantText, speaker_uuid, style_id);
-  for (const url of audioUrls) {
-    const audio = new Audio(url);
-    await new Promise((resolve) => {
-      audio.onended = resolve;
-      audio.onerror = resolve;
-      audio.play().catch(resolve);
-    });
+  // 末尾が句点で終わらなかった分も最後に読む
+  if (ttsBuf.trim()) {
+    enqueueTtsSentence(ttsBuf.trim(), speaker_uuid, style_id);
+    ttsBuf = "";
   }
 
   await fetch("/v1/chat/messages", {
