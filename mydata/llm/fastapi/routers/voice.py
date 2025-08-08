@@ -1,85 +1,88 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import os
 import requests
 import io
 from pydub import AudioSegment
 import re
+import json
+import asyncio
+import base64
 
 router = APIRouter(prefix="/v1/voice")
 
 VOICEVOX_HOST = os.getenv("VOICEVOX_HOST", "http://voicevox:50021")
 
-# === ユーティリティ ===
-def get_json(endpoint: str):
-    try:
-        res = requests.get(f"{VOICEVOX_HOST}{endpoint}")
-        res.raise_for_status()
-        return res.json()
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"VOICEVOX接続エラー: {str(e)}")
-
+# ---------- utils ----------
 def split_sentences(text: str):
-    # 「。」や改行で分割（空文は除外）
     parts = re.split(r'[。！？]\s*|\n+', text)
     return [p.strip() for p in parts if p.strip()]
 
-# === 話者一覧取得 ===
+def _vvx_get(endpoint: str):
+    try:
+        r = requests.get(f"{VOICEVOX_HOST}{endpoint}")
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"VOICEVOX接続エラー: {e}")
+
+# ---------- speakers ----------
 @router.get("/speakers")
 def get_speakers():
-    try:
-        speakers = get_json("/speakers")
-        return {"success": True, "data": speakers, "error": None}
-    except HTTPException as e:
-        raise e
+    """
+    フロントが期待する形:
+      { "success": True, "data": [ {speaker_uuid, name, styles:[{id,name}, ...]} ], "error": None }
+    """
+    speakers = _vvx_get("/speakers")
+    return {"success": True, "data": speakers, "error": None}
 
-# === 音声合成用リクエスト形式 ===
+# ---------- request model ----------
 class SynthesisRequest(BaseModel):
     text: str
     speaker_uuid: str
     style_id: int
 
-# === 文単位の音声合成 API（保存なし版）===
-@router.post("/synthesize_multi")
-def synthesize_multi(body: SynthesisRequest):
-    try:
-        speaker_param = body.style_id
-        sentences = split_sentences(body.text)
-        audio_blobs = []
+# ---------- TTS streaming (文ごとMP3 base64) ----------
+@router.post("/synthesize_stream")
+async def synthesize_stream(body: SynthesisRequest):
+    speaker_param = body.style_id
+    sentences = split_sentences(body.text)
 
+    async def event_stream():
         for sentence in sentences:
             if not sentence:
                 continue
+            try:
+                # audio_query
+                q = requests.post(
+                    f"{VOICEVOX_HOST}/audio_query",
+                    params={"text": sentence, "speaker": speaker_param},
+                    timeout=30,
+                )
+                q.raise_for_status()
 
-            # STEP1: audio_query
-            query_res = requests.post(
-                f"{VOICEVOX_HOST}/audio_query",
-                params={"text": sentence, "speaker": speaker_param}
-            )
-            query_res.raise_for_status()
+                # synthesis (wav)
+                s = requests.post(
+                    f"{VOICEVOX_HOST}/synthesis",
+                    params={"speaker": speaker_param},
+                    json=q.json(),
+                    timeout=60,
+                )
+                s.raise_for_status()
 
-            # STEP2: synthesis（WAVバイナリ取得）
-            synth_res = requests.post(
-                f"{VOICEVOX_HOST}/synthesis",
-                params={"speaker": speaker_param},
-                json=query_res.json()
-            )
-            synth_res.raise_for_status()
+                # wav -> mp3 (文ごと)
+                wav_bytes = io.BytesIO(s.content)
+                audio = AudioSegment.from_file(wav_bytes, format="wav")
+                mp3_bytes = io.BytesIO()
+                audio.export(mp3_bytes, format="mp3")
+                mp3_bytes.seek(0)
 
-            # STEP3: MP3変換（メモリ上のみ）
-            wav_bytes = io.BytesIO(synth_res.content)
-            audio = AudioSegment.from_file(wav_bytes, format="wav")
-            mp3_bytes = io.BytesIO()
-            audio.export(mp3_bytes, format="mp3")
-            mp3_bytes.seek(0)
+                b64 = base64.b64encode(mp3_bytes.read()).decode("ascii")
+                yield f"data: {json.dumps({'sentence': sentence, 'mp3_b64': b64}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.02)
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
-            # クライアント用：hex文字列で返す
-            audio_blobs.append(mp3_bytes.read().hex())
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-        return JSONResponse(content={"success": True, "data": audio_blobs, "error": None})
-
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"VOICEVOX接続エラー: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"音声合成処理失敗: {str(e)}")
