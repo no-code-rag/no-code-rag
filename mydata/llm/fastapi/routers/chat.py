@@ -4,6 +4,7 @@ import json
 import httpx
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import List
 from fastapi import APIRouter, HTTPException
@@ -58,7 +59,6 @@ def load_rag_instruction(rag_mode: str) -> str:
 async def extract_keywords(query: str, model: str) -> List[str]:
     try:
         def clean_json_codeblock(text: str) -> str:
-            import re
             match = re.search(r"```(?:json)?\s*(\[[\s\S]+?\])\s*```", text)
             if match:
                 return match.group(1).strip()
@@ -70,9 +70,21 @@ async def extract_keywords(query: str, model: str) -> List[str]:
                 {
                     "role": "system",
                     "content": (
-                        "以下の文章からRAG検索に使うキーワードを最大5個抽出してください。\n"
-                        "返答はJSON配列のみで。コードブロックや説明文は禁止。\n"
-                        "例：[\"覚醒剤\", \"違法収集証拠\"]"
+                        "あなたのタスクは、ユーザーからの質問文に**実際に登場する名詞のみ**を抽出し、"
+                        "検索用キーワードとして最大5個までJSON配列で返すことです。\n\n"
+                        "🔒制約条件：\n"
+                        "- 出力する単語は、入力文に**実際に現れた名詞**のみとすること（言い換え・類義語は禁止）\n"
+                        "- 名詞以外（動詞・形容詞・副詞など）は含めない\n"
+                        "- 抽象語・汎用語（例：事案、問題、ケース、内容 など）は含めない\n"
+                        "- 単語の順番は、文中の出現順と一致させてください\n"
+                        "- 出力はJSON配列のみ。コードブロック（```）や説明は禁止\n\n"
+                        "✅良い例：\n"
+                        "入力：死刑判決が出されたケースについて教えてください\n"
+                        "出力：[\"死刑判決\"]\n\n"
+                        "❌悪い例：\n"
+                        "[\"冤罪\"] ← 文中に存在しない\n"
+                        "[\"刑罰\", \"判例\"] ← 類義語\n"
+                        "```[\"死刑\"]``` ← コードブロックは禁止\n"
                     )
                 },
                 {
@@ -99,7 +111,6 @@ async def extract_keywords(query: str, model: str) -> List[str]:
         logging.warning(f"[WARN] keyword抽出失敗: {e}")
         return []
 
-
 @router.post("/completions")
 async def completions(req: CompletionRequest):
     user_message = next((m.content for m in reversed(req.messages) if m.role == "user"), "")
@@ -109,19 +120,11 @@ async def completions(req: CompletionRequest):
     if req.room_id:
         save_streamed_message(req.room_id, role="user", content=user_message, model=req.model)
 
-    # 上位ルール（キャラ設定）
     character_raw = load_base_prompt(req.prompt_id).strip()
-    character_prompt = f"【上位ルール】\n{character_raw}"
-
-    # ユーザー質問（優先して配置）
-    question_prompt = f"【質問】\n{user_message.strip()}"
-
-    # RAGテンプレート
     rag_template_raw = load_rag_instruction(req.rag_mode)
     if "{context_text}" not in rag_template_raw:
         rag_template_raw += "\n\n【RAGチャンク】\n{context_text}"
 
-    # ✅ context_text を search.py 経由で main.py に問い合わせる
     context_text = ""
     if req.rag_mode != "off":
         keywords = await extract_keywords(user_message, req.model)
@@ -141,8 +144,6 @@ async def completions(req: CompletionRequest):
             context_text = ""
 
     rag_filled = rag_template_raw.replace("{context_text}", context_text.strip())
-    rag_prompt = f"【下位ルール】\n{rag_filled.strip()}"
-
     user_prompt = (
         "以下のルールに従って回答せよ。\n"
         "【第１階層】上位ルールは【キャラクター設定】であり、回答全体を通じて人格・口調・語彙・価値観を一貫させること。\n"
@@ -168,20 +169,19 @@ async def completions(req: CompletionRequest):
             res.raise_for_status()
 
             async def stream():
-                buffer = []
+                buffer = ""
                 async for line in res.aiter_lines():
                     if line.startswith("data: "):
                         data = line.replace("data: ", "").strip()
                         if data == "[DONE]":
-                            full = "".join(buffer).strip()
-                            if req.room_id and full:
-                                save_streamed_message(req.room_id, "assistant", full, req.model)
+                            if req.room_id and buffer.strip():
+                                save_streamed_message(req.room_id, "assistant", buffer.strip(), req.model)
                             break
                         try:
                             delta = json.loads(data)["choices"][0]["delta"]
                             content = delta.get("content", "")
                             if content:
-                                buffer.append(content)
+                                buffer += content
                                 yield line + "\n"
                         except:
                             continue
@@ -189,7 +189,6 @@ async def completions(req: CompletionRequest):
     except Exception as e:
         logging.error(f"[ERROR] LLM応答失敗: {e}")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
-
 
 
 
