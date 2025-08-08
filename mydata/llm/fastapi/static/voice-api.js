@@ -45,7 +45,7 @@ export async function initVoiceSettings() {
       speakerSelect.value = speaker_uuid;
     } else {
       speakerSelect.selectedIndex = 0;
-      updateGlobalConfig("speaker_uuid", speakerSelect.value); // ✅ 修正
+      updateGlobalConfig("speaker_uuid", speakerSelect.value);
     }
 
     // ✅ スタイルを更新（configの style_id を反映）
@@ -55,12 +55,12 @@ export async function initVoiceSettings() {
     speakerSelect.addEventListener("change", () => {
       const uuid = speakerSelect.value;
       updateStyleOptions(uuid);
-      updateGlobalConfig("speaker_uuid", uuid); // ✅ 修正
+      updateGlobalConfig("speaker_uuid", uuid);
     });
 
     styleSelect.addEventListener("change", () => {
-      updateGlobalConfig("speaker_uuid", speakerSelect.value); // ✅ 修正
-      updateGlobalConfig("style_id", parseInt(styleSelect.value)); // ✅ 修正
+      updateGlobalConfig("speaker_uuid", speakerSelect.value);
+      updateGlobalConfig("style_id", parseInt(styleSelect.value));
     });
 
   } catch (err) {
@@ -101,12 +101,11 @@ function updateStyleOptions(speaker_uuid, selectedStyleId = null) {
     styleSelect.value = selectedStyleId;
   } else {
     styleSelect.selectedIndex = 0;
-    // ❌ updateGlobalConfig() はここでは呼ばない
   }
 }
 
 /**
- * 単一音声合成（従来）
+ * 単一音声合成（従来）— 互換のため残置
  */
 export async function synthesizeSpeech(text, speaker_uuid, style_id) {
   try {
@@ -125,7 +124,7 @@ export async function synthesizeSpeech(text, speaker_uuid, style_id) {
 }
 
 /**
- * 複数文の音声合成（文ごと再生向け・保存なし対応）
+ * まとめ合成（旧）— 仕様互換のため残置、使わない
  */
 export async function synthesizeMultiSpeech(text, speaker_uuid, style_id) {
   try {
@@ -150,5 +149,81 @@ export async function synthesizeMultiSpeech(text, speaker_uuid, style_id) {
     return [];
   }
 }
+
+/* =============================
+   ▼ ここから：順序保証のTTSワーカ（重要）
+   - enqueueTtsSentence() で文を投入
+   - 内部キューを1つずつ処理（逐次）
+   - 各レスポンスのMP3は再生キューへ（到着順で再生）
+   ============================= */
+const __ttsReqQueue = [];
+let __ttsWorking = false;
+
+const __audioQueue = [];
+let __isPlaying = false;
+
+function __playQueue() {
+  if (__isPlaying || __audioQueue.length === 0) return;
+  __isPlaying = true;
+  const url = __audioQueue.shift();
+  const audio = new Audio(url);
+  audio.onended = () => { __isPlaying = false; __playQueue(); };
+  audio.onerror  = () => { __isPlaying = false; __playQueue(); };
+  audio.play().catch(() => { __isPlaying = false; __playQueue(); });
+}
+
+async function __drainTtsQueue() {
+  __ttsWorking = true;
+  try {
+    while (__ttsReqQueue.length) {
+      const { text, speaker_uuid, style_id } = __ttsReqQueue.shift();
+      await __synthesizeStreamOne(text, speaker_uuid, style_id); // ← 完了まで待つ（順序保証）
+    }
+  } finally {
+    __ttsWorking = false;
+  }
+}
+
+async function __synthesizeStreamOne(text, speaker_uuid, style_id) {
+  try {
+    const res = await fetch("/v1/voice/synthesize_stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, speaker_uuid, style_id })
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const data = JSON.parse(line.replace("data: ", ""));
+        if (!data.mp3_b64) continue;
+
+        const bytes = Uint8Array.from(atob(data.mp3_b64), c => c.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mp3" }));
+        __audioQueue.push(url);
+        __playQueue();
+      }
+    }
+  } catch (err) {
+    console.error("TTSストリーム失敗:", err);
+  }
+}
+
+/** 外部公開：文を順序キューに投入（即戻る） */
+export function enqueueTtsSentence(text, speaker_uuid, style_id) {
+  if (!text || !text.trim()) return;
+  __ttsReqQueue.push({ text: text.trim(), speaker_uuid, style_id });
+  if (!__ttsWorking) __drainTtsQueue();
 
 
