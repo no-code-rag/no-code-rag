@@ -1,4 +1,7 @@
-let allSpeakers = [];  // ← グローバルで保持
+// voice-api.js
+// ストリーミングTTS（/v1/voice/synthesize_stream）に統一。
+
+let allSpeakers = []; // ← グローバルで保持
 
 import { getGlobalConfig, updateGlobalConfig } from "./config.js";
 
@@ -8,6 +11,7 @@ import { getGlobalConfig, updateGlobalConfig } from "./config.js";
 export async function initVoiceSettings() {
   try {
     const res = await fetch("/v1/voice/speakers");
+    if (!res.ok) throw new Error(`話者一覧取得失敗: ${res.status}`);
     const data = await res.json();
     if (!data.success || !Array.isArray(data.data)) {
       throw new Error("話者データが不正です");
@@ -59,8 +63,9 @@ export async function initVoiceSettings() {
     });
 
     styleSelect.addEventListener("change", () => {
+      const sid = parseInt(styleSelect.value, 10);
       updateGlobalConfig("speaker_uuid", speakerSelect.value);
-      updateGlobalConfig("style_id", parseInt(styleSelect.value));
+      updateGlobalConfig("style_id", Number.isNaN(sid) ? null : sid);
     });
 
   } catch (err) {
@@ -96,65 +101,19 @@ function updateStyleOptions(speaker_uuid, selectedStyleId = null) {
     styleSelect.appendChild(option);
   }
 
-  // ✅ 選択状態を反映するが、初期ロード時のみselectedStyleId適用
+  // ✅ 選択状態を反映（初期ロード時のみ selectedStyleId を優先）
   if (selectedStyleId !== null && speaker.styles.some(s => s.id === selectedStyleId)) {
-    styleSelect.value = selectedStyleId;
+    styleSelect.value = String(selectedStyleId);
   } else {
     styleSelect.selectedIndex = 0;
   }
 }
 
-/**
- * 単一音声合成（従来）— 互換のため残置
- */
-export async function synthesizeSpeech(text, speaker_uuid, style_id) {
-  try {
-    const res = await fetch("/v1/voice/synthesize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, speaker_uuid, style_id }),
-    });
-    if (!res.ok) throw new Error(`音声合成失敗: ${res.status}`);
-    const blob = await res.blob();
-    return URL.createObjectURL(blob);
-  } catch (err) {
-    console.error("音声合成失敗:", err);
-    return null;
-  }
-}
-
-/**
- * まとめ合成（旧）— 仕様互換のため残置、使わない
- */
-export async function synthesizeMultiSpeech(text, speaker_uuid, style_id) {
-  try {
-    const res = await fetch("/v1/voice/synthesize_multi", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, speaker_uuid, style_id }),
-    });
-
-    const result = await res.json();
-    if (!result.success || !Array.isArray(result.data)) {
-      throw new Error("音声データ取得失敗");
-    }
-
-    return result.data.map(hexStr => {
-      const bytes = new Uint8Array(hexStr.match(/.{1,2}/g).map(b => parseInt(b, 16)));
-      return URL.createObjectURL(new Blob([bytes], { type: "audio/mp3" }));
-    });
-
-  } catch (err) {
-    console.error("複数音声合成失敗:", err);
-    return [];
-  }
-}
-
 /* =============================
-   ▼ ここから：順序保証のTTSワーカ（重要）
+   ▼ 順序保証のTTSワーカ
    - enqueueTtsSentence() で文を投入
-   - 内部キューを1つずつ処理（逐次）
-   - 各レスポンスのMP3は再生キューへ（到着順で再生）
+   - 内部キューを逐次処理（順序保証）
+   - 受信MP3は再生キューへ（到着順で再生）
    ============================= */
 const __ttsReqQueue = [];
 let __ttsWorking = false;
@@ -167,9 +126,21 @@ function __playQueue() {
   __isPlaying = true;
   const url = __audioQueue.shift();
   const audio = new Audio(url);
-  audio.onended = () => { __isPlaying = false; __playQueue(); };
-  audio.onerror  = () => { __isPlaying = false; __playQueue(); };
-  audio.play().catch(() => { __isPlaying = false; __playQueue(); });
+  audio.onended = () => {
+    __isPlaying = false;
+    URL.revokeObjectURL(url);
+    __playQueue();
+  };
+  audio.onerror  = () => {
+    __isPlaying = false;
+    URL.revokeObjectURL(url);
+    __playQueue();
+  };
+  audio.play().catch(() => {
+    __isPlaying = false;
+    URL.revokeObjectURL(url);
+    __playQueue();
+  });
 }
 
 async function __drainTtsQueue() {
@@ -191,6 +162,7 @@ async function __synthesizeStreamOne(text, speaker_uuid, style_id) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, speaker_uuid, style_id })
     });
+    if (!res.ok || !res.body) throw new Error(`TTSストリーム失敗: ${res.status}`);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder("utf-8");
@@ -201,14 +173,19 @@ async function __synthesizeStreamOne(text, speaker_uuid, style_id) {
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n\n");
-      buffer = lines.pop();
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() ?? "";
 
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const data = JSON.parse(line.replace("data: ", ""));
+      for (const chunk of chunks) {
+        if (!chunk.startsWith("data: ")) continue;
+        const json = chunk.slice(6);
+        if (!json) continue;
+
+        let data;
+        try { data = JSON.parse(json); } catch { continue; }
         if (!data.mp3_b64) continue;
 
+        // b64 → Blob URL
         const bytes = Uint8Array.from(atob(data.mp3_b64), c => c.charCodeAt(0));
         const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mp3" }));
         __audioQueue.push(url);
@@ -216,7 +193,7 @@ async function __synthesizeStreamOne(text, speaker_uuid, style_id) {
       }
     }
   } catch (err) {
-    console.error("TTSストリーム失敗:", err);
+    console.error("TTSストリーム処理エラー:", err);
   }
 }
 
@@ -225,5 +202,5 @@ export function enqueueTtsSentence(text, speaker_uuid, style_id) {
   if (!text || !text.trim()) return;
   __ttsReqQueue.push({ text: text.trim(), speaker_uuid, style_id });
   if (!__ttsWorking) __drainTtsQueue();
-
+}
 
