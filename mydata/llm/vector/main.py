@@ -1,6 +1,9 @@
+# main.py (fix: SELECT uuid -> uid)
 import logging
 import sqlite3
 import json
+import re
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict, Any
 from fastapi import FastAPI
@@ -10,7 +13,6 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from fastapi.middleware.cors import CORSMiddleware
 
-# FastAPI 初期化
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -19,13 +21,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 埋め込みモデル読み込み
 MODEL_PATH = "/mydata/llm/vector/models/legal-bge-m3"
 model = SentenceTransformer(MODEL_PATH).to("cpu")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logging.info(f"[INFO] 埋め込みモデル読み込み完了: {MODEL_PATH}")
 
-# ベクトル・メタDBパス
 FAISS_INDEXES = {
     "pdf_word": Path("/mydata/llm/vector/db/faiss/pdf_word/index.faiss"),
     "excel_calendar": Path("/mydata/llm/vector/db/faiss/excel_calendar/index.faiss"),
@@ -36,13 +36,107 @@ SQLITE_PATHS = {
 }
 CHUNK_DIR = Path("/mydata/llm/vector/db/chunk")
 
-# リクエストスキーマ
+JP_TOKEN = re.compile(r"[ぁ-んァ-ン一-龥A-Za-z0-9]+")
+
+def _normalize_score(s: float, lo=0.5, hi=0.9) -> float:
+    s = max(lo, min(hi, s))
+    return (s - lo) / (hi - lo)
+
+def _build_bigrams(words: List[str]) -> List[str]:
+    ws = [w for w in words if w]
+    return ["".join(p) for p in zip(ws, ws[1:])]
+
+def _keyword_score(text: str, kws: List[str], bigrams: List[str]) -> float:
+    if not kws:
+        return 0.0
+    hit = sum(1 for k in kws if k and k in text)
+    base = hit / max(1, len(kws))
+    bigram_bonus = 0.2 if any(b and b in text for b in bigrams) else 0.0
+    return min(1.0, base + bigram_bonus)
+
+def _compute_adjacency_bonus(cands: List[Dict[str, Any]]) -> List[float]:
+    by_doc = defaultdict(list)
+    for i, c in enumerate(cands):
+        by_doc[c["path"]].append((i, c["chunk_index"], c.get("_base", 0.0)))
+    bonus = [0.0] * len(cands)
+    for items in by_doc.values():
+        items.sort(key=lambda x: x[1])
+        for j, (i_idx, idx, bscore) in enumerate(items):
+            for k in (-2, -1, 1, 2):
+                jj = j + k
+                if 0 <= jj < len(items):
+                    _, idx2, b2 = items[jj]
+                    if abs(idx2 - idx) == 1 and b2 >= 0.55:
+                        bonus[i_idx] = max(bonus[i_idx], 0.15)
+                    elif abs(idx2 - idx) == 2 and b2 >= 0.60:
+                        bonus[i_idx] = max(bonus[i_idx], 0.10)
+    return bonus
+
+def _extract_keywords_from_query(q: str, limit=12) -> List[str]:
+    toks = [t for t in JP_TOKEN.findall(q) if len(t) >= 2]
+    seen, out = set(), []
+    for t in toks:
+        if t not in seen:
+            seen.add(t); out.append(t)
+        if len(out) >= limit: break
+    return out
+
+def rerank_candidates(
+    query: str,
+    base_candidates: List[Dict[str, Any]],
+    given_keywords: List[str] = None,
+    use_adjacency: bool = False,
+    final_topk: int = 8,
+    weights=(0.6, 0.3, 0.1),
+) -> List[Dict[str, Any]]:
+    if not base_candidates:
+        return []
+    kws = given_keywords or []
+    if not kws:
+        kws = _extract_keywords_from_query(query)
+    bigrams = _build_bigrams(kws)
+
+    w_embed, w_kw, w_adj = weights
+    gated: List[Dict[str, Any]] = []
+    for c in base_candidates:
+        kw = _keyword_score(c["text"], kws, bigrams)
+        if kw > 0.0 or c["score"] >= 0.80:
+            c["_embed"] = _normalize_score(c["score"])
+            c["_kw"] = kw
+            c["_base"] = w_embed * c["_embed"] + w_kw * c["_kw"]
+            gated.append(c)
+
+    if not gated:
+        gated = base_candidates[:]
+
+    adj_bonus = [0.0] * len(gated)
+    if use_adjacency:
+        adj_bonus = _compute_adjacency_bonus(gated)
+
+    for c, bn in zip(gated, adj_bonus):
+        c["_adj"] = bn if use_adjacency else 0.0
+        c["_rerank"] = c["_base"] + w_adj * c["_adj"]
+
+    seen_pi = set()
+    uniq = []
+    for c in sorted(gated, key=lambda x: x["_rerank"], reverse=True):
+        key = (c["path"], c["chunk_index"])
+        if key in seen_pi:
+            continue
+        seen_pi.add(key)
+        c["adjusted_score"] = round(float(c["_rerank"]), 4)
+        for k in ("_embed","_kw","_base","_adj","_rerank"):
+            c.pop(k, None)
+        uniq.append(c)
+        if len(uniq) >= max(1, final_topk):
+            break
+    return uniq
+
 class EmbedRequest(BaseModel):
     query: str
     top_k: int = 30
     keywords: List[str] = []
 
-# チャンク読込関数
 def load_chunk_text(path: str, index: int) -> str:
     chunk_file = CHUNK_DIR / f"{path}.jsonl"
     if not chunk_file.exists():
@@ -58,41 +152,43 @@ def load_chunk_text(path: str, index: int) -> str:
         logging.error(f"[ERROR] チャンク読込失敗: {chunk_file} → {e}")
     return ""
 
-# ベクトル検索
 @app.post("/embed_search")
 async def embed_search(req: EmbedRequest) -> Dict[str, Any]:
     logging.info(f"[INFO] クエリ: {req.query} (top_k={req.top_k})")
 
-    # ベクトル化
     embedding = np.array(model.encode([req.query], normalize_embeddings=True), dtype=np.float32)
     if embedding.ndim == 1:
         embedding = embedding.reshape(1, -1)
 
-    hits = []
+    step1_hits: List[Dict[str, Any]] = []
 
-    # DBごとに検索
     for db_group, sqlite_path in SQLITE_PATHS.items():
         if not sqlite_path.exists() or not FAISS_INDEXES[db_group].exists():
             logging.warning(f"[WARN] DB見つからず: {db_group}")
             continue
 
         index = faiss.read_index(str(FAISS_INDEXES[db_group]))
-        D, I = index.search(embedding, req.top_k)
+        k_search = max(req.top_k, 50)
+        D, I = index.search(embedding, k_search)
 
         with sqlite3.connect(str(sqlite_path)) as conn:
             cur = conn.cursor()
             for score, vec_index in zip(D[0], I[0]):
                 if vec_index == -1:
                     continue
-                cur.execute("SELECT uid, chunk_index, path, type FROM vector_metadata WHERE vec_index=?", (int(vec_index),))
+                # ★ fix: uid カラムを使用
+                cur.execute(
+                    "SELECT uid, chunk_index, path, type FROM vector_metadata WHERE vec_index=?",
+                    (int(vec_index),),
+                )
                 row = cur.fetchone()
                 if not row:
                     continue
                 uid, chunk_index, path, dtype = row
-                text = load_chunk_text(path, chunk_index)
+                text = load_chunk_text(path, int(chunk_index))
                 if not text.strip():
                     continue
-                hits.append({
+                step1_hits.append({
                     "vec_index": int(vec_index),
                     "uid": uid,
                     "chunk_index": int(chunk_index),
@@ -100,37 +196,38 @@ async def embed_search(req: EmbedRequest) -> Dict[str, Any]:
                     "type": dtype,
                     "score": float(score),
                     "source": db_group,
-                    "text": text
+                    "text": text,
                 })
 
-        logging.info(f"[INFO] ヒット件数: {len(hits)} 件 → {db_group}")
+        logging.info(f"[INFO] ヒット件数: {len([h for h in step1_hits if h['source']==db_group])} 件 → {db_group}")
 
-    if not hits:
-        return {"hits": [], "filtered_hits": [], "grouped_chunks": [], "context_text": ""}
+    if not step1_hits:
+        return {"context_text": ""}
 
-    # スコア調整＋フィルタ
-    adjusted_hits = []
-    for h in hits:
-        score = h["score"]
-        if any(kw in h["text"] for kw in req.keywords):
-            score += 0.1
-        h["adjusted_score"] = round(score, 4)
-        if score >= 0.675:
-            adjusted_hits.append(h)
+    pdf_candidates = [h for h in step1_hits if h["source"] == "pdf_word"]
+    exlcal_candidates = [h for h in step1_hits if h["source"] == "excel_calendar"]
 
-    logging.info(f"[INFO] filtered_hits: {len(adjusted_hits)} 件（score >= 0.675）")
+    reranked_pdf = rerank_candidates(
+        req.query, pdf_candidates, given_keywords=req.keywords,
+        use_adjacency=True, final_topk=6, weights=(0.6, 0.3, 0.1)
+    )
+    reranked_exlcal = rerank_candidates(
+        req.query, exlcal_candidates, given_keywords=req.keywords,
+        use_adjacency=False, final_topk=15, weights=(0.7, 0.3, 0.0)
+    )
 
-    # チャンク選定（Word/PDF・Excel/Calendar）
-    grouped_chunks = []
+    logging.info(f"[INFO] filtered(pdf_word Top6): {len(reranked_pdf)} / filtered(excel_calendar Top15): {len(reranked_exlcal)}")
+
+    grouped_chunks: List[Dict[str, Any]] = []
     seen = set()
 
-    # Word/PDF: 上位3件＋前後1、続く3件はそのまま
-    word_hits = sorted([h for h in adjusted_hits if h["source"] == "pdf_word"], key=lambda x: -x["adjusted_score"])
-    top3 = word_hits[:3]
-    next3 = word_hits[3:6]
+    # PDF/Word: Top3に前後±1付与 → 次の3件はそのまま
+    word_hits_sorted = sorted(reranked_pdf, key=lambda x: -x["adjusted_score"])
+    top3 = word_hits_sorted[:3]
+    next3 = word_hits_sorted[3:6]
 
     for target in top3:
-        for offset in [-1, 0, 1]:
+        for offset in (-1, 0, 1):
             idx = target["chunk_index"] + offset
             uid = f"{target['path']}:{idx}"
             if uid in seen:
@@ -143,7 +240,7 @@ async def embed_search(req: EmbedRequest) -> Dict[str, Any]:
                     "chunk_index": idx,
                     "text": text,
                     "type": target["type"],
-                    "score": target["adjusted_score"]
+                    "score": target["adjusted_score"],
                 })
 
     for h in next3:
@@ -156,12 +253,11 @@ async def embed_search(req: EmbedRequest) -> Dict[str, Any]:
             "chunk_index": h["chunk_index"],
             "text": h["text"],
             "type": h["type"],
-            "score": h["adjusted_score"]
+            "score": h["adjusted_score"],
         })
 
-    # Excel/Calendar: 上位15件
-    excel_hits = sorted([h for h in adjusted_hits if h["source"] == "excel_calendar"], key=lambda x: -x["adjusted_score"])[:15]
-    for h in excel_hits:
+    # Excel/Calendar: Top15 をスコア高い順で
+    for h in sorted(reranked_exlcal, key=lambda x: -x["adjusted_score"]):
         uid = f"{h['path']}:{h['chunk_index']}"
         if uid in seen:
             continue
@@ -171,26 +267,21 @@ async def embed_search(req: EmbedRequest) -> Dict[str, Any]:
             "chunk_index": h["chunk_index"],
             "text": h["text"],
             "type": h["type"],
-            "score": h["adjusted_score"]
+            "score": h["adjusted_score"],
         })
 
     logging.info(f"[INFO] grouped_chunks: {len(grouped_chunks)} 件")
 
-    # context_text 構築
     context_parts = []
     for chunk in sorted(grouped_chunks, key=lambda x: -x["score"]):
         label = f"[FILE] {chunk['path']}（{chunk['type']}）"
         context_parts.append(label)
         context_parts.append(chunk["text"])
-
     context_text = "\n\n".join(context_parts)
     logging.info(f"[INFO] context_text 文字数: {len(context_text)} 文字")
 
-    return {
-        "context_text": context_text
-    }
+    return {"context_text": context_text}
 
-# ヘルスチェック
 @app.get("/")
 async def root():
     return {"message": "RAG Search API OK"}
