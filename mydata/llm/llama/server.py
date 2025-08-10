@@ -1,56 +1,71 @@
-from fastapi import FastAPI, Query
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from llama_cpp import Llama
-import os
 
-app = FastAPI()
+app = FastAPI(title="llama.cpp API Server", version="1.0.0")
 
-# === モデルファイルのパス一覧 ===
-MODEL_PATHS = {
-    "shisa": "./models/shisa8b-q4.gguf",
-}
-
-# === モデルインスタンスのキャッシュ ===
-MODELS = {}
-
-def get_model(model_name: str) -> Llama:
-    if model_name not in MODELS:
-        if model_name not in MODEL_PATHS:
-            raise ValueError(f"Unknown model: {model_name}")
-        print(f"🔄 Loading model: {model_name}")
-        MODELS[model_name] = Llama(
-            model_path=MODEL_PATHS[model_name],
-            n_ctx=4096,
-            n_threads=os.cpu_count(),  # すべてのCPUスレッド使う
-            n_batch=64
-        )
-    return MODELS[model_name]
-
-# === リクエスト形式 ===
 class CompletionRequest(BaseModel):
     prompt: str
-    model: str = "shisa"
-    max_tokens: int = 128
+    model: str  # First API の /v1/model/list が返す id（例: /models/foo/bar.gguf）
     temperature: float = 0.7
+    max_tokens: int = 512
+    top_p: float = 0.95
+    stop: list[str] = []
 
-# === レスポンス形式 ===
-class CompletionResponse(BaseModel):
-    response: str
+def load_model(model_path: str) -> Llama:
+    """
+    llama.cpp モデルをロード
+    model_path: 例 '/models/foo/bar.gguf' （絶対 or 相対）
+    """
+    if not os.path.isabs(model_path):
+        model_path = os.path.abspath(model_path)
 
-@app.post("/v1/completions", response_model=CompletionResponse)
-def complete(req: CompletionRequest):
-    llm = get_model(req.model)
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=400, detail=f"モデルファイルが見つかりません: {model_path}")
 
-    full_prompt = f"{req.prompt}"
-    print(f"📝 {req.model}: {req.prompt}")
-
-    result = llm(
-        full_prompt,
-        max_tokens=req.max_tokens,
-        temperature=req.temperature,
-        echo=False
+    return Llama(
+        model_path=model_path,
+        n_ctx=4096,
+        n_threads=os.cpu_count(),
+        verbose=False
     )
 
-    text = result["choices"][0]["text"]
-    return {"response": text.strip()}
+@app.post("/v1/completions")
+async def create_completion(request: CompletionRequest):
+    llm = load_model(request.model)
+    output = llm(
+        request.prompt,
+        max_tokens=request.max_tokens,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        stop=request.stop
+    )
+    return {
+        "completion": output,
+        "model_used": request.model
+    }
+
+@app.post("/v1/chat/completions")
+async def create_chat_completion(request: CompletionRequest):
+    llm = load_model(request.model)
+    output = llm.create_chat_completion(
+        messages=[{"role": "user", "content": request.prompt}],
+        max_tokens=request.max_tokens,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        stop=request.stop
+    )
+    return {
+        "completion": output,
+        "model_used": request.model
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    # 0.0.0.0:8000 で起動（コンテナ外からアクセス可）
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
