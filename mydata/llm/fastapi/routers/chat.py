@@ -113,6 +113,9 @@ async def extract_keywords(query: str, model: str) -> List[str]:
 
 @router.post("/completions")
 async def completions(req: CompletionRequest):
+    # ★ 追加: モデル使用ログ（PortainerのFirst APIコンテナに出力）
+    print(f"[INFO] 使用モデル: {req.model}", flush=True)
+
     user_message = next((m.content for m in reversed(req.messages) if m.role == "user"), "")
     if not user_message:
         raise HTTPException(status_code=400, detail="ユーザーメッセージがありません")
