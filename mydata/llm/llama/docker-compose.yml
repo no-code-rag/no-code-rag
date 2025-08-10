@@ -1,19 +1,16 @@
 version: '3.8'
 
 services:
-  llama:
-    image: ghcr.io/ggerganov/llama.cpp:server
+  llama-fastapi:
+    image: llama   # 既にビルド済みのローカルイメージ名
     container_name: llama
-    command: >
-      --model /models/gemma-3-4b-it-qat-q4_0/gemma-3-4b-it-qat-q4_0-japanese-imatrix-Q4_K_M.gguf
-      --threads 16
-      --ctx-size 4096
-      --n-predict 2048
-      --port 8000
-      --host 0.0.0.0
-      --repeat_penalty 1.1 --repeat_last_n 64
+    environment:
+      - MODEL=None
+      - LLAMA_CPP_THREADS=12
+      - LLAMA_CPP_CONTEXT_SIZE=4096
     volumes:
       - /mydata/llm/llama/models:/models
+      - /mydata/llm/llama/server.py:/app/server.py
     networks:
       - secretary-net
     ports:
@@ -27,3 +24,4 @@ services:
 networks:
   secretary-net:
     external: true
+
